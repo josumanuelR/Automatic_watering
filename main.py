@@ -1,12 +1,16 @@
+import sys
+sys.path.insert(1, './database')
+
 from enum import Enum
-from fastapi import FastAPI, Body, HTTPException, Response
+from fastapi import FastAPI, Body, HTTPException, Response #, JSONResponse
+from fastapi_pagination import Page, add_pagination, paginate
+from fastapi.middleware.cors import CORSMiddleware
+from typing import List
 from pydantic import BaseModel
 from pocketbase import PocketBase  # Client also works the same
 from pocketbase.client import FileUpload
 import asyncio
 import time
-
-from fastapi.middleware.cors import CORSMiddleware
 
 
 
@@ -14,7 +18,8 @@ from fastapi.middleware.cors import CORSMiddleware
 #inicia FastAPI, PocketBase API y CORSMiddleware
 # set up CORS to allow requests from the frontend
 server = FastAPI()
-database = PocketBase('http://localhost:8090')
+add_pagination(server) # Add pagination to the server
+database = PocketBase('http://localhost:8090') # Initialize PocketBase client
 
 server.add_middleware(
     CORSMiddleware,
@@ -27,6 +32,14 @@ server.add_middleware(
 
 
 
+#Objecto de paginación
+class logs(BaseModel):
+    id: str
+    log_id: int
+    description: str
+    created: str
+    updated: str
+
 
 #Declaración de variables
 valveNum = 8
@@ -37,7 +50,7 @@ presetsdata = []
 
 
 #Diccionario para DHT11
-dht11data = [
+climaticdata = [
     {
         "id" : 1,
         "temp" : 0
@@ -48,7 +61,7 @@ dht11data = [
     },
     {
         "id" : 3,
-        "lux" : 0
+        "lux" : 0.0
     },
 ]
 
@@ -144,45 +157,35 @@ async def watering_can():
 
 #Request del DHT11                                                                                          #Path1
 @server.get("/climatic_variables/body", tags = ["Variables climáticas"]) #hace request al cuerpo completo
-async def temp_humid():
-    return dht11data
+async def temp_humid_lux():
+    return climaticdata
 
 @server.get("/climatic_variables/{id}", tags = ["Variables climáticas"])
-async def temp_humid_get(id : int):
-    for i in dht11data:
+async def temp_humid_lux_get(id : int):
+    for i in climaticdata:
         if i["id"] == id:
             return i
     raise HTTPException(status_code=404, detail="Item not found")
 
-@server.put("/climatic_variables/{id}", tags = ["Variables climáticas"])
-async def temp_humid_put(
-    id: int,
+@server.put("/climatic_variables", tags = ["Variables climáticas"])
+async def temp_humid_lux_put(
     temp: int | None = Body(default=None),
     humid: float | None = Body(default=None),
-    lux: int | None = Body(default=None)
+    lux: float | None = Body(default=None)
 ):
 
-    if id == 1:
-        if temp == None:
-            return Response(status_code=204)
-        dht11data[0]["temp"] = temp
-        return dht11data[0]
+
+    if temp != None:
+        climaticdata[0]["temp"] = temp
+
+    if humid != None:
+        climaticdata[1]["humid"] = humid
+
+    if lux != None:
+        climaticdata[2]["lux"] = lux
     
-    if id == 2:
-        if humid == None:
-            return Response(status_code=204)
-        dht11data[1]["humid"] = float(humid)
-        return dht11data[1]
+    return climaticdata
 
-    if id == 3:
-        if lux == None:
-            return Response(status_code=204)
-        dht11data[2]["lux"] = int(lux)
-        return dht11data[2]
-
-    if not checkIdExists(dht11data, id):
-        raise HTTPException(status_code=404, detail="Item not found")
-    return []
 
 
 #Request de database                                                                                        #Path2
@@ -449,7 +452,43 @@ async def check_irrigation(): # Check if irrigation is active
         
         waterdata[2]["irrigation"] = data
 
-    
+
+####                                                                               Querys a la base de datos
+@server.get("/logs_database/{page}", tags = ["colección logs"])
+async def logs_database_query(page: int):
+    result = database.collection("logs").get_list(page)
+
+    return {
+        "items": result.items,
+        "totalItems": result.total_items,
+        "totalPages": result.total_pages,
+        "page": result.page,
+        "perPage": result.per_page,
+    }
+
+
+
+#sensoresHumedad = "1,3,8"
+@server.get("/graphic_data", tags = ["Colección de datos gráficos"])
+async def graphic_data_query(humidity: bool = False, temperature: bool = False, sensoresHumedad: str = ""):
+    if len(sensoresHumedad) > 0:
+        sensoresHumedad_list = []
+        for i in sensoresHumedad.split(","):
+            sensoresHumedad_list.append(int(i))
+    data = {}
+    if humidity:
+        data["humidity"] = (database.collection("relative_humidity").get_list(1)).items
+
+    if temperature:
+        data["temperature"] = (database.collection("temperature").get_list(1)).items
+
+    if len(sensoresHumedad_list) > 0:
+        # Build filter string like "id=1 || id=2 || id=3"
+        data["sensoresHumedad"] = {}
+        for id in sensoresHumedad_list:
+            data["sensoresHumedad"][id] = (database.collection(f"{id:02}_soilM_and_valve_data")).get_list(1).items
+    return data
+
 
 
 
@@ -458,7 +497,7 @@ async def check_irrigation(): # Check if irrigation is active
 async def database_connect():
     try:
         # Authenticate as admin
-        admin_data = database.admins.auth_with_password("EMAIL", "PASSWROD")
+        admin_data = database.admins.auth_with_password("josue30_97@hotmail.com", "wabibabo")
         print(f"Database connected as following user: {admin_data.is_valid}")
         return admin_data.is_valid
     except Exception as e:
@@ -475,7 +514,7 @@ async def startup_event():
         print("WARNING: Could not connect to database at startup")
     
     # Start the background task for database syncing
-    asyncio.create_task(send_data_database())
+    asyncio.create_task(send_sensors_data_database())
     asyncio.create_task(download_data_database())
     asyncio.create_task(check_irrigation())
     print("Background tasks started")
@@ -515,7 +554,7 @@ async def database_update(collection, record_id, body): #Actualizar un registro 
 
 
 
-async def send_data_database(): # Enviar temp, hum, y sensor data a la base de datos cada 20 minutos
+async def send_sensors_data_database(): # Enviar temp, hum, y sensor data a la base de datos cada 20 minutos
     print("Starting database sync task...")
     while True:
 
@@ -527,28 +566,38 @@ async def send_data_database(): # Enviar temp, hum, y sensor data a la base de d
             try:
                 # Format data for database insert
                 temp_data = {
-                    "temp": dht11data[0]["temp"]
+                    "temp": climaticdata[0]["temp"]
                 }
                 
                 # Send temperature data to database
-                result = await database_create("temperature", temp_data)
+                result = await database_create("temperature", temp_data) #Envia los datos de temperatura a la base de datos
                 if result is None:
                     print("Failed to save temperature data")
                     
                 # Format data for database insert
                 humid_data = {
-                    "humd": dht11data[1]["humid"]
+                    "humd": climaticdata[1]["humid"]
                 }
 
                 # Send Relative humidity data to database
-                result = await database_create("relative_humidity", humid_data)
+                result = await database_create("relative_humidity", humid_data) #Envia los datos de humedad relativa a la base de datos
                 if result is None:
                     print("Failed to save Relative humidity data")
                 
+                # Format data for database insert
+                lux_data = {
+                    "lux": climaticdata[2]["lux"]
+                }
+
+                # Send Light data to database
+                result = await database_create("light", lux_data) #Envia los datos de luz a la base de datos
+                if result is None:
+                    print("Failed to save Relative light data")
+
                 
                 for i in range(valveNum):
                     if soilMdata[i]["error_code"] <= 0:
-                        await sensor_data_create(i)
+                        await sensor_data_create(i) # Envia los datos de humedad del suelo y estado de la válvula a la base de datos
 
 
                 print("Data sent to database")
@@ -624,8 +673,8 @@ async def send_log_database(id, description): # Enviar logs a la base de datos a
     return
 
 
-async def a():
-    a()
+async def send_water_data_database():
+    send_water_data_database()
     return
 
 
