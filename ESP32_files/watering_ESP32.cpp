@@ -1,6 +1,8 @@
 #include <ArduinoBLE.h>
 
 //Declaración de variables
+unsigned long startTime;
+unsigned long elapsedTime; //Para trigger el led built in
 int moistSensor;
 int percentage;
 int avrPercentage;
@@ -32,8 +34,8 @@ void setup() {
 
   
   //Asignación de pines
-  pinMode(15, INPUT);
-  pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(4, INPUT);
+  pinMode(8, OUTPUT);
 }
 
 
@@ -42,9 +44,9 @@ void loop() { //La función de loop corre una y otra vez por siempre
   
   BLEDevice central = BLE.central();
   
-  digitalWrite(LED_BUILTIN, HIGH);   // turn the LED on (HIGH is the voltage level)
+  digitalWrite(8, LOW);   // turn the LED on (HIGH is the voltage level)
   delay(200);                       // wait for 200ms
-  digitalWrite(LED_BUILTIN, LOW);    // turn the LED off by making the voltage LOW
+  digitalWrite(8, HIGH);    // turn the LED off by making the voltage LOW
   delay(200);        
   
   if (central.connected()){
@@ -52,7 +54,9 @@ void loop() { //La función de loop corre una y otra vez por siempre
     Serial.println(central.address()); //Pide a central su dirección Bluetooth
 
     while (central.connected()){
-      digitalWrite(LED_BUILTIN, HIGH);   // turn the LED on (HIGH is the voltage level)
+      //Take time
+      startTime = millis();
+
 
       for (int i = 1; i <= 10; i++){
         delay(2);
@@ -73,6 +77,17 @@ void loop() { //La función de loop corre una y otra vez por siempre
           
       avrPercentage = 0;
 
+
+      if ((startTime - elapsedTime) >= 9800){ 
+        digitalWrite(8, LOW); 
+
+        if ((startTime - elapsedTime) >= 10000){
+          digitalWrite(8, HIGH); 
+
+          elapsedTime = startTime;
+        }
+
+      }
         
     }
       
