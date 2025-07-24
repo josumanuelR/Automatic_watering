@@ -582,7 +582,7 @@ async def send_sensors_data_database(): # Enviar temp, hum, y sensor data a la b
                 # Send Relative humidity data to database
                 result = await database_create("relative_humidity", humid_data) #Envia los datos de humedad relativa a la base de datos
                 if result is None:
-                    print("Failed to save Relative humidity data")
+                    print("Failed to save relative humidity data")
                 
                 # Format data for database insert
                 lux_data = {
@@ -592,9 +592,20 @@ async def send_sensors_data_database(): # Enviar temp, hum, y sensor data a la b
                 # Send Light data to database
                 result = await database_create("light", lux_data) #Envia los datos de luz a la base de datos
                 if result is None:
-                    print("Failed to save Relative light data")
+                    print("Failed to save light data")
 
                 
+                # Format data for database insert
+                water_tank_level_data = {
+                    "level": waterdata[1]["water_tank_level"]
+                }
+
+                # Send Water tank level data to database
+                result = await database_create("water_tank_level", water_tank_level_data) #Envia los datos de nivel de agua del tanque a la base de datos
+                if result is None:
+                    print("Failed to save water tank level data")
+
+
                 for i in range(valveNum):
                     if soilMdata[i]["error_code"] <= 0:
                         await sensor_data_create(i) # Envia los datos de humedad del suelo y estado de la válvula a la base de datos
