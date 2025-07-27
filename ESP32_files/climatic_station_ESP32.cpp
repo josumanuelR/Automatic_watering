@@ -1,5 +1,5 @@
 //Librerías incluidas en el ESP32
-#include <WiFiManager.h> // https://github.com/tzapu/WiFiManager
+#include <WiFiManager.h>  // https://github.com/tzapu/WiFiManager
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
@@ -9,24 +9,25 @@
 
 //Declaración de variables
 unsigned long startTime;
-unsigned long elapsedTime_lux; //Tiempo para ajuste de sensor de luz
-unsigned long elapsedTime_blink; //Tiempo para ajuste blink
+unsigned long elapsedTime_lux;    //Tiempo para ajuste de sensor de luz
+unsigned long elapsedTime_blink;  //Tiempo para ajuste blink
 
 
 // 192.168.100.156 casa
-// 192.168.68.126 boi
-String host_name   = "http://192.168.100.156:8000"; // Numero de IP
-String path_name_body   = "/climatic_variables/body";      // Endpoint del servidor, entrega todo el objeto
-String path_name  = "/climatic_variables";
+// 192.168.68.122 boi
+String host_name = "http://192.168.100.156:8000";    // Numero de IP
+String path_name_body = "/climatic_variables/body";  // Endpoint del servidor, entrega todo el objeto
+String path_name = "/climatic_variables";
 
 String payload;
 
 const int wifiConfTrigger = 27;
 
-int timeout = 120; // seconds to run for
+int timeout = 300;  // seconds to run for
 
 bool res;
 bool objectReady = false;
+bool wifiReady = false;
 
 
 
@@ -45,66 +46,96 @@ Adafruit_VEML7700 veml = Adafruit_VEML7700();
 
 void setup() {
 
-  //Inicio de protocolos de comunicación  
-  WiFi.mode(WIFI_STA); // explicitly set mode, esp defaults to STA+AP
+  //Inicio de protocolos de comunicación
+  WiFi.mode(WIFI_STA);  // explicitly set mode, esp defaults to STA+AP
   WiFi.reconnect();
-  
-  Serial.begin(9600); //Inicia comunicación serial
+
+  Serial.begin(9600);  //Inicia comunicación serial
   Serial.println("\n Starting ESP32");
 
-  Wire.begin (); //Inicia comunicación de puestos I2C
+  Wire.begin();  //Inicia comunicación de puestos I2C
+
+  if (!veml.begin()) { //inicia el sensor veml7700
+  Serial.println("Sensor not found");
+  while (1);
+  }
 
   //Asignación de pines
-  // pinMode(8, OUTPUT);Wire.begin ();
-  
 
+  pinMode(LED_BUILTIN, OUTPUT);
   pinMode(wifiConfTrigger, INPUT_PULLUP);
 
 }
 
 
-void loop() { // put your main code here, to run repeatedly:
+void loop() {  // put your main code here, to run repeatedly:
   //Take time
   startTime = millis();
 
 
 
-  // Wifi configuration, triggered by pin 10
-  if ( digitalRead(wifiConfTrigger) == LOW ) {
+  // Wifi configuration, triggered by pin 27
+  if (digitalRead(wifiConfTrigger) == LOW) {
     wifi_connect();
   }
-  Serial.println("1");
 
 
-  //Hace request al servidor y obtiene path_name_body solo una vez
-  if (!(objectReady) && (WiFi.status() == WL_CONNECTED)){
-    request_server_get(path_name_body, &climaticdata);
-    objectReady = true;
-  } 
-  Serial.println("2");
 
+  //Revisa si se encuentra conectado al wifi
+  if ((WiFi.status() == WL_CONNECTED) && (!(wifiReady))) {
 
-  //Si la conexión se cae, reincia objectready
-  if (WiFi.status() != WL_CONNECTED) {
-    delayMicroseconds(1000000);
-    objectReady = false;
-    Serial.println("Wi-Fi is not connected");
+    Serial.println("Connected to Wi-Fi");
+    wifiReady = true;
+
+  } else if (WiFi.status() != WL_CONNECTED) {
+
+    Serial.println("Connected to Wi-Fi");
+    wifiReady = false;
+
   }
-  Serial.println("3");
 
 
-  if (objectReady){
-    if ((startTime - elapsedTime_lux) >= 300000) {
+
+  //Revisa si se encuentra al servidor y obtuvo el objecto correactamente
+  if (wifiReady){
+    if (!(objectReady)){
+
+      bool error;
+      error = request_server_get(path_name_body, &climaticdata);
+
+      if (error){
+        if (climaticdata.is<JsonArray>()) {
+          Serial.println("Connected with the server, object ready to use");
+          objectReady = true;
+        } else {
+          Serial.println("Connected with the server, error requesting object");
+          objectReady = false;
+        }
+      } else {
+        Serial.println("Error trying to connect with server");
+      }
+    }
+  }
+  
+  
+
+  if (objectReady) {
+    if ((startTime - elapsedTime_lux) >= 10000) {
       // Ajuste del sensor de luxes
-      lux_sensor_automatic_adjustment ();
+      lux_sensor_automatic_adjustment();
       elapsedTime_lux = startTime;
     }
-    Serial.println("Eso tilín");
-    
 
+
+    //Lectura y escritura de sensor de luz    
     climaticdata[2]["lux"] = veml.readLux();
     Serial.print("lux: ");
     Serial.println(climaticdata[2]["lux"].as<float>());
+
+
+
+    request_server_put(path_name, &climaticdata);
+
 
     
   }
@@ -116,56 +147,54 @@ void loop() { // put your main code here, to run repeatedly:
 
 
 
+void led_blink(){
 
-// void led_blink(){
-//   if (waterdata[2]["irrigation"]){
-//     if ((startTime - elapsedTime) >= 2000) {
-//     digitalWrite(8, HIGH);
-//     } else {
-//     digitalWrite(8, LOW);        
-//     }
-//   } else {
-//     digitalWrite(8, LOW);
-//   }
-// }
+  if ((startTime - elapsedTime_blink) >= 2000) {
+  digitalWrite(LED_BUILTIN, HIGH);
+  } else {
+  digitalWrite(LED_BUILTIN, LOW);
+  }
+
+}
 
 
 
-void wifi_connect(){
+void wifi_connect() {
 
-  // digitalWrite(8, LOW);
+  digitalWrite(LED_BUILTIN, HIGH);
 
   //reset settings - for testing
   wm.resetSettings();
 
   // set configportal timeout
-  // wm.setConfigPortalTimeout(timeout);
+  wm.setConfigPortalTimeout(timeout);
 
-  res = wm.autoConnect("ESP32_WifiConfig","jijijaja");
+  res = wm.autoConnect("ESP32_WifiConfig", "jijijaja");
   if (!res) {
     Serial.println("Failed to connect");
-    // digitalWrite(8, HIGH);
+    digitalWrite(LED_BUILTIN, LOW);
     ESP.restart();
   }
 
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
-  } 
+  }
 
   Serial.println("");
   Serial.println("WiFi connected...yeey :3");
-  // digitalWrite(8, HIGH);
+  digitalWrite(LED_BUILTIN, LOW);
 }
 
 
 
-void lux_sensor_automatic_adjustment (){
+void lux_sensor_automatic_adjustment() {
   // to read lux using automatic method, specify VEML_LUX_AUTO
   float lux = veml.readLux(VEML_LUX_AUTO);
 
   Serial.println("------------------------------------");
-  Serial.print("Lux = "); Serial.println(lux);
+  Serial.print("Lux = ");
+  Serial.println(lux);
   Serial.println("Settings used for reading:");
   Serial.print(F("Gain: "));
   switch (veml.getGain()) {
@@ -183,24 +212,22 @@ void lux_sensor_automatic_adjustment (){
     case VEML7700_IT_400MS: Serial.println("400"); break;
     case VEML7700_IT_800MS: Serial.println("800"); break;
   }
-
 }
 
 
 
-void request_server_get(String path_name, JsonDocument* doc){
-  http.begin(host_name + path_name); //Inicia comunicación HTTP
+bool request_server_get(String path_name, JsonDocument* doc) {
+  http.begin(host_name + path_name);  //Inicia comunicación HTTP
 
   int httpCode = http.GET();
 
   if (!(http.connected())) {
+    Serial.print("Failed to connect server");
     http.end();
-    return;
+    return false;
   }
-  
-  DeserializationError error;
 
-  Serial.println(path_name);
+  DeserializationError error;
 
   // httpCode will be negative on error
   if (httpCode > 0) {
@@ -217,31 +244,31 @@ void request_server_get(String path_name, JsonDocument* doc){
   } else {
     Serial.printf("[HTTP] GET... failed, error: %s\n", http.errorToString(httpCode).c_str());
     http.end();
-    return;
+    return false;
   }
 
   if (error) {
     Serial.print("deserializeJson() failed: ");
     Serial.println(error.c_str());
     http.end();
-    return;
+    return false;
   }
-  
+
   http.end();
+  return true;
 }
 
 
 
-void request_server_put(String path_name, JsonDocument* doc){
-  http.begin(host_name + path_name); //Inicia comunicación HTTP
+bool request_server_put(String path_name, JsonDocument* doc) {
+  http.begin(host_name + path_name);  //Inicia comunicación HTTP
 
   if (!(http.connected())) {
     http.end();
-    return;
+    return false;
   }
 
   String output;
-
 
   serializeJson(*doc, output);
 
@@ -262,8 +289,9 @@ void request_server_put(String path_name, JsonDocument* doc){
   } else {
     Serial.printf("[HTTP] GET... failed, error: %s\n", http.errorToString(httpCode).c_str());
     http.end();
-    return;
+    return false;
   }
 
   http.end();
+  return true;
 }
