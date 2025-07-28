@@ -1,9 +1,11 @@
 //Librerías incluidas en el ESP32
+#include <vector>
 #include <WiFiManager.h>  // https://github.com/tzapu/WiFiManager
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <Adafruit_VEML7700.h>
+#include <DHT.h>
 
 
 
@@ -11,6 +13,7 @@
 unsigned long startTime;
 unsigned long elapsedTime_lux;    //Tiempo para ajuste de sensor de luz
 unsigned long elapsedTime_blink;  //Tiempo para ajuste blink
+unsigned long elapsedTime_request;  //Tiempo para envio request
 
 
 // 192.168.100.156 casa
@@ -22,12 +25,19 @@ String path_name = "/climatic_variables";
 String payload;
 
 const int wifiConfTrigger = 27;
+const int dhtData = 13;
 
 int timeout = 300;  // seconds to run for
 
 bool res;
 bool objectReady = false;
 bool wifiReady = false;
+
+float temperature;
+float humidity;
+
+std::vector<float> avgData = {0.0, 0.0, 0.0};
+int avgIndex = 0;
 
 
 
@@ -43,6 +53,9 @@ WiFiManager wm;
 //Inicializar el sensor de Lux 7700
 Adafruit_VEML7700 veml = Adafruit_VEML7700();
 
+//Inicializar el sensor DHT
+DHT dht(dhtData, DHT11); 
+
 
 void setup() {
 
@@ -55,22 +68,36 @@ void setup() {
 
   Wire.begin();  //Inicia comunicación de puestos I2C
 
+
+  // Inicio de sensores
   if (!veml.begin()) { //inicia el sensor veml7700
   Serial.println("Sensor not found");
   while (1);
   }
+  
+  dht.begin(); //inicia el sensor dht
+
+
+  // Ajuste inicial del sensor de luz
+  lux_sensor_automatic_adjustment();
+
 
   //Asignación de pines
-
   pinMode(LED_BUILTIN, OUTPUT);
   pinMode(wifiConfTrigger, INPUT_PULLUP);
-
+  
 }
+
 
 
 void loop() {  // put your main code here, to run repeatedly:
   //Take time
   startTime = millis();
+
+
+
+  // LED blinks if it is connected
+  led_blink();
 
 
 
@@ -89,8 +116,9 @@ void loop() {  // put your main code here, to run repeatedly:
 
   } else if (WiFi.status() != WL_CONNECTED) {
 
-    Serial.println("Connected to Wi-Fi");
+    Serial.println("Not connected to Wi-Fi");
     wifiReady = false;
+    objectReady = false;
 
   }
 
@@ -112,35 +140,80 @@ void loop() {  // put your main code here, to run repeatedly:
           objectReady = false;
         }
       } else {
-        Serial.println("Error trying to connect with server");
+        Serial.println("Failed to connect with server");
+        objectReady = false;
       }
     }
   }
   
   
 
-  if (objectReady) {
-    if ((startTime - elapsedTime_lux) >= 10000) {
+  if (objectReady) {                             //Reading sensors and sending data
+
+    if ((startTime - elapsedTime_lux) >= 60000) {
       // Ajuste del sensor de luxes
       lux_sensor_automatic_adjustment();
       elapsedTime_lux = startTime;
     }
 
 
-    //Lectura y escritura de sensor de luz    
-    climaticdata[2]["lux"] = veml.readLux();
-    Serial.print("lux: ");
-    Serial.println(climaticdata[2]["lux"].as<float>());
+
+    //Lectura y escritra sensor de humedad y temperatura
+    temperature = dht.readTemperature(); // Celsius
+    humidity = dht.readHumidity();
+
+    if (!(isnan(humidity) || isnan(temperature))) {
+      avgData[2] = avgData[2] + veml.readLux(); //Lectura de sensor de luz   
+
+      avgData[0] = avgData[0] + temperature;//Lectura de sensor DHT   
+      avgData[1] = avgData[1] + humidity;
+
+      avgIndex = avgIndex + 1;
+    }
+
+
+    if (avgIndex >= 5){
+      climaticdata[0]["temp"] = avgData[0]/avgIndex;
+      climaticdata[1]["humid"] = avgData[1]/avgIndex;
+      climaticdata[2]["lux"] = avgData[2]/avgIndex;
+
+
+      Serial.print("temp(Celsius): ");
+      Serial.println(climaticdata[0]["temp"].as<float>());
+
+      Serial.print("humid: ");
+      Serial.println(climaticdata[1]["humid"].as<float>());
+
+      Serial.print("lux: ");
+      Serial.println(climaticdata[2]["lux"].as<float>());
+
+      avgIndex = 0;
+      avgData = {0.0, 0.0, 0.0};
+
+    }
 
 
 
-    request_server_put(path_name, &climaticdata);
+    if ((startTime - elapsedTime_request) >= 2000){
 
+      bool error;
+      error = request_server_put(path_name, &climaticdata);
 
+      if (error){
+        Serial.println("Request to server succesfully");
+      } else {
+        Serial.println("Error requesting to server");
+        Serial.println("Reconnecting with server");
+        objectReady = false;
+      }
+
+      elapsedTime_request = startTime;
+
+    }
     
   }
 
-  delay(1000);
+
 
 }
 
@@ -148,11 +221,18 @@ void loop() {  // put your main code here, to run repeatedly:
 
 
 void led_blink(){
+  if (objectReady){
+    if ((startTime - elapsedTime_blink) >= 2900) {
+      digitalWrite(LED_BUILTIN, HIGH);
+    } else {
+      digitalWrite(LED_BUILTIN, LOW);
+    }
 
-  if ((startTime - elapsedTime_blink) >= 2000) {
-  digitalWrite(LED_BUILTIN, HIGH);
+    if ((startTime - elapsedTime_blink) >= 3000) {
+      elapsedTime_blink = startTime;
+    } 
   } else {
-  digitalWrite(LED_BUILTIN, LOW);
+    digitalWrite(LED_BUILTIN, LOW);
   }
 
 }
@@ -222,7 +302,7 @@ bool request_server_get(String path_name, JsonDocument* doc) {
   int httpCode = http.GET();
 
   if (!(http.connected())) {
-    Serial.print("Failed to connect server");
+    Serial.println("Can't establish HTTP connection");
     http.end();
     return false;
   }
@@ -240,6 +320,8 @@ bool request_server_get(String path_name, JsonDocument* doc) {
     } else {
       // HTTP header has been send and Server response header has been handled
       Serial.printf("[HTTP] GET... code: %d\n", httpCode);
+      http.end();
+      return false;
     }
   } else {
     Serial.printf("[HTTP] GET... failed, error: %s\n", http.errorToString(httpCode).c_str());
@@ -264,6 +346,8 @@ bool request_server_put(String path_name, JsonDocument* doc) {
   http.begin(host_name + path_name);  //Inicia comunicación HTTP
 
   if (!(http.connected())) {
+    
+    Serial.println("Can't establish HTTP connection");
     http.end();
     return false;
   }
@@ -272,7 +356,7 @@ bool request_server_put(String path_name, JsonDocument* doc) {
 
   serializeJson(*doc, output);
 
-  // Serial.println(output);
+  Serial.println(output);
 
   int httpCode = http.PUT(output);
 
@@ -285,6 +369,8 @@ bool request_server_put(String path_name, JsonDocument* doc) {
     } else {
       // HTTP header has been send and Server response header has been handled
       Serial.printf("[HTTP] GET... code: %d\n", httpCode);
+      http.end();
+      return false;
     }
   } else {
     Serial.printf("[HTTP] GET... failed, error: %s\n", http.errorToString(httpCode).c_str());
