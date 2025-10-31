@@ -89,8 +89,7 @@ void setup() {
 }
 
 
-
-void loop() {  // put your main code here, to run repeatedly:
+void loop() { // put your main code here, to run repeatedly: 
   //Take time
   startTime = millis();
 
@@ -101,121 +100,95 @@ void loop() {  // put your main code here, to run repeatedly:
 
 
 
-  // Wifi configuration, triggered by pin 27
-  if (digitalRead(wifiConfTrigger) == LOW) {
+  // Wifi configuration, triggered by pin 10
+  if ( digitalRead(wifiConfTrigger) == LOW ) {
     wifi_connect();
   }
 
 
 
-  //Revisa si se encuentra conectado al wifi
-  if ((WiFi.status() == WL_CONNECTED) && (!(wifiReady))) {
 
-    Serial.println("Connected to Wi-Fi");
-    wifiReady = true;
-
-  } else if (WiFi.status() != WL_CONNECTED) {
-
-    Serial.println("Not connected to Wi-Fi");
-    wifiReady = false;
-    objectReady = false;
-
-  }
-
-
-
-  //Revisa si se encuentra al servidor y obtuvo el objecto correactamente
-  if (wifiReady){
-    if (!(objectReady)){
-
-      bool error;
-      error = request_server_get(path_name_body, &climaticdata);
-
-      if (error){
-        if (climaticdata.is<JsonArray>()) {
-          Serial.println("Connected with the server, object ready to use");
-          objectReady = true;
-        } else {
-          Serial.println("Connected with the server, error requesting object");
-          objectReady = false;
-        }
-      } else {
-        Serial.println("Failed to connect with server");
-        objectReady = false;
-      }
-    }
-  }
-  
-  
-
-  if (objectReady) {                             //Reading sensors and sending data
-
-    if ((startTime - elapsedTime_lux) >= 60000) {
-      // Ajuste del sensor de luxes
-      lux_sensor_automatic_adjustment();
-      elapsedTime_lux = startTime;
-    }
-
-
-
-    //Lectura y escritra sensor de humedad y temperatura
-    temperature = dht.readTemperature(); // Celsius
-    humidity = dht.readHumidity();
-
-    if (!(isnan(humidity) || isnan(temperature))) {
-      avgData[2] = avgData[2] + veml.readLux(); //Lectura de sensor de luz   
-
-      avgData[0] = avgData[0] + temperature;//Lectura de sensor DHT   
-      avgData[1] = avgData[1] + humidity;
-
-      avgIndex = avgIndex + 1;
-    }
-
-
-    if (avgIndex >= 5){
-      climaticdata[0]["temp"] = avgData[0]/avgIndex;
-      climaticdata[1]["humid"] = avgData[1]/avgIndex;
-      climaticdata[2]["lux"] = avgData[2]/avgIndex;
-
-
-      Serial.print("temp(Celsius): ");
-      Serial.println(climaticdata[0]["temp"].as<float>());
-
-      Serial.print("humid: ");
-      Serial.println(climaticdata[1]["humid"].as<float>());
-
-      Serial.print("lux: ");
-      Serial.println(climaticdata[2]["lux"].as<float>());
-
-      avgIndex = 0;
-      avgData = {0.0, 0.0, 0.0};
-
-    }
-
-
-
-    if ((startTime - elapsedTime_request) >= 2000){
-
-      bool error;
-      error = request_server_put(path_name, &climaticdata);
-
-      if (error){
-        Serial.println("Request to server succesfully");
-      } else {
-        Serial.println("Error requesting to server");
-        Serial.println("Reconnecting with server");
-        objectReady = false;
-      }
-
-      elapsedTime_request = startTime;
-
-    }
+  if (WiFi.status() == WL_CONNECTED){  //La conexión al Wi-fi se ha establecido con éxito
     
+    if (!(objectReady)){  //Hace request al servidor y obtiene path_name_body solo una vez
+      if (request_server_get(path_name_body, &climaticdata)){
+        objectReady = true; //El objeto se ha obtenido con éxito
+      } else {
+        Serial.println("Connecting ..."); //El objeto aún no se ha obtenido
+      }
+      
+      delay(1000);
+
+    } else {   //Una vez el objeto se encuentra listo corre la siguiente rutina
+      
+      
+      
+      if ((startTime - elapsedTime_lux) >= 60000) { //Ajuste automatico de la exposición cada minuto
+        // Ajuste del sensor de luxes
+        lux_sensor_automatic_adjustment();
+        elapsedTime_lux = startTime;
+      }
+
+
+
+      //Lectura y escritra sensor de humedad y temperatura
+      temperature = dht.readTemperature(); // Celsius
+      humidity = dht.readHumidity();
+
+      if (!(isnan(humidity) || isnan(temperature))) {
+        avgData[2] = avgData[2] + veml.readLux(); //Lectura de sensor de luz   
+
+        avgData[0] = avgData[0] + temperature;//Lectura de sensor DHT   
+        avgData[1] = avgData[1] + humidity;
+
+        avgIndex = avgIndex + 1;
+      }
+
+
+      if (avgIndex >= 5){
+        climaticdata[0]["temp"] = avgData[0]/avgIndex;
+        climaticdata[1]["humid"] = avgData[1]/avgIndex;
+        climaticdata[2]["lux"] = avgData[2]/avgIndex;
+
+
+        Serial.print("temp(Celsius): ");
+        Serial.println(climaticdata[0]["temp"].as<float>());
+
+        Serial.print("humid: ");
+        Serial.println(climaticdata[1]["humid"].as<float>());
+
+        Serial.print("lux: ");
+        Serial.println(climaticdata[2]["lux"].as<float>());
+
+        avgIndex = 0;
+        avgData = {0.0, 0.0, 0.0};
+
+      }
+
+
+
+      if ((startTime - elapsedTime_request) >= 2000){ //Actualiza la información del servidor cada 2 segundos
+
+        if (request_server_put(path_name, &climaticdata)){
+          Serial.println("Data sent!");
+        } else {
+          Serial.println("Communication error");
+        }
+
+        elapsedTime_request = startTime;
+
+      }
+    }
+  } else { //Si la conexión se cae, reincia objectready
+
+    objectReady = false;
+    Serial.println("Wi-Fi is not connected");
+
+    delay(1000);
+
   }
+} 
 
-
-
-}
 
 
 
@@ -297,34 +270,24 @@ void lux_sensor_automatic_adjustment() {
 
 
 bool request_server_get(String path_name, JsonDocument* doc) {
-  http.begin(host_name + path_name);  //Inicia comunicación HTTP
+  http.begin(host_name + path_name); // Inicia comunicación HTTP
 
   int httpCode = http.GET();
-
-  if (!(http.connected())) {
-    Serial.println("Can't establish HTTP connection");
-    http.end();
-    return false;
-  }
+  
 
   DeserializationError error;
-
-  // httpCode will be negative on error
-  if (httpCode > 0) {
-    // file found at server
+  if (httpCode > 0) { 
     if (httpCode == HTTP_CODE_OK) {
       String payload = http.getString();
-      // Serial.println(payload);
-      Serial.printf("Request successfully to %s\n", path_name);
+      Serial.printf("Request GET successfully to %s — server response (HTTP %d)\n", path_name.c_str(), httpCode);
       error = deserializeJson(*doc, payload);
     } else {
-      // HTTP header has been send and Server response header has been handled
       Serial.printf("[HTTP] GET... code: %d\n", httpCode);
-      http.end();
       return false;
     }
   } else {
-    Serial.printf("[HTTP] GET... failed, error: %s\n", http.errorToString(httpCode).c_str());
+    Serial.printf("[HTTP] GET... failed, error: %s\n",
+    http.errorToString(httpCode).c_str());
     http.end();
     return false;
   }
@@ -335,45 +298,37 @@ bool request_server_get(String path_name, JsonDocument* doc) {
     http.end();
     return false;
   }
-
+  
   http.end();
   return true;
 }
 
 
 
-bool request_server_put(String path_name, JsonDocument* doc) {
-  http.begin(host_name + path_name);  //Inicia comunicación HTTP
-
-  if (!(http.connected())) {
-    
-    Serial.println("Can't establish HTTP connection");
-    http.end();
-    return false;
-  }
+bool request_server_put(String path_name, JsonDocument* doc){
+  http.begin(host_name + path_name); //Inicia comunicación HTTP 
+  
+  // Definir headers con app.json content type
+  http.addHeader("Content-Type", "application/json");
 
   String output;
-
   serializeJson(*doc, output);
-
-  Serial.println(output);
 
   int httpCode = http.PUT(output);
 
-  // httpCode will be negative on error
+  // No se ocupan más checks
   if (httpCode > 0) {
-    // file found at server
+    // Porfa funcione
     if (httpCode == HTTP_CODE_OK) {
-      Serial.printf("Request successfully to %s\n", path_name);
-
+      Serial.printf("Request PUT successfully to %s — server response (HTTP %d)\n", path_name.c_str(), httpCode);
     } else {
-      // HTTP header has been send and Server response header has been handled
-      Serial.printf("[HTTP] GET... code: %d\n", httpCode);
-      http.end();
+      // Acá se maneja la conexión si hay errores o no
+      Serial.printf("[HTTP] PUT... code: %d\n", httpCode); 
       return false;
     }
   } else {
-    Serial.printf("[HTTP] GET... failed, error: %s\n", http.errorToString(httpCode).c_str());
+    //Error managing
+    Serial.printf("[HTTP] PUT... failed, error: %s\n", http.errorToString(httpCode).c_str());
     http.end();
     return false;
   }
