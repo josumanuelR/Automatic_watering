@@ -103,7 +103,7 @@ void handleNotFound() {
 
 
 void setup() {
-  
+
   setCpuFrequencyMhz(80);
 
   // Build the initial climatic data JSON array (id/key/value entries).
@@ -236,11 +236,16 @@ void loop() {
       Serial.println("Wi-Fi lost -> HTTP server stopped.");
     }
 
-    Serial.println("Wi-Fi is not connected");
+
+    if (wifiState==WIFI_TRYING){
+      Serial.println("Wi-Fi is not connected");
+    }
+    
 
     if (wifiStateStart == 0) {
       wifiStateStart = millis();  // mark when this state began
     }
+
 
     switch (wifiState) {
 
@@ -287,7 +292,7 @@ void loop() {
         break;
     }
 
-    delay(1000);
+    delay(10);
   }
 }
 
@@ -307,8 +312,37 @@ void led_blink() {
     }
 
   } else {
-    digitalWrite(LED_BUILTIN, LOW);
+
+    switch (wifiState){
+
+      case WIFI_TRYING:
+
+        if ((startTime - elapsedTime_blink) >= 100) {
+          digitalWrite(LED_BUILTIN, HIGH);
+        } else {
+          digitalWrite(LED_BUILTIN, LOW);
+        }
+
+        if ((startTime - elapsedTime_blink) >= 200) {
+          elapsedTime_blink = startTime;
+        }
+
+      break;
+
+      case WIFI_SLEEPING:
+        digitalWrite(LED_BUILTIN, LOW);
+
+      break;
+
+      case WIFI_ATTEMPTING:
+        digitalWrite(LED_BUILTIN, HIGH);
+
+      break;
+
+    }
+
   }
+
 }
 
 
