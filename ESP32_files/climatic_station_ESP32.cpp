@@ -2,7 +2,7 @@
 #include <vector>
 #include <WiFiManager.h>  // https://github.com/tzapu/WiFiManager
 #include <WiFi.h>
-#include <HTTPClient.h>
+#include <WebServer.h>
 #include <ArduinoJson.h>
 #include <Adafruit_VEML7700.h>
 #include <DHT.h>
@@ -16,13 +16,9 @@ unsigned long elapsedTime_blink;  //Tiempo para ajuste blink
 unsigned long elapsedTime_request;  //Tiempo para envio request
 
 
-// 192.168.100.156 casa
-// 192.168.68.122 boi
-String host_name = "http://192.168.100.156:8000";    // Numero de IP
-String path_name_body = "/climatic_variables/body";  // Endpoint del servidor, entrega todo el objeto
-String path_name = "/climatic_variables";
-
-String payload;
+// The ESP32 is now the HTTP server.
+// A client can request the latest climatic data with:
+// GET http://<ESP32_IP>/climatic_variables
 
 const int wifiConfTrigger = 27;
 const int dhtData = 13;
@@ -30,8 +26,22 @@ const int dhtData = 13;
 int timeout = 300;  // seconds to run for
 
 bool res;
-bool objectReady = false;
 bool wifiReady = false;
+bool serverRunning = false;  // Tracks whether server.begin() has been called
+
+// --- Wi-Fi recovery state machine ---
+// TRYING:     just disconnected, retrying normally
+// SLEEPING:   gave up for now, radio is off, waiting for next cycle
+// ATTEMPTING: radio woken up, giving it a brief window to reconnect
+enum WifiRecoveryState { WIFI_TRYING, WIFI_SLEEPING, WIFI_ATTEMPTING };
+WifiRecoveryState wifiState = WIFI_TRYING;
+unsigned long wifiStateStart = 0;        // when the current state began
+unsigned long lastReconnectAttempt = 0;  // throttles retries within TRYING
+
+const unsigned long tryDuration = 60000;       // 1 min of normal retries before sleeping
+const unsigned long reconnectInterval = 10000; // retry every 10s while TRYING
+const unsigned long sleepDuration = 120000;    // 2 min radio-off between attempts
+const unsigned long attemptDuration = 10000;   // 10s window to reconnect once woken
 
 float temperature;
 float humidity;
@@ -40,12 +50,29 @@ std::vector<float> avgData = {0.0, 0.0, 0.0};
 int avgIndex = 0;
 
 
+//Climatic data Json file
+struct Reading { int id; const char* key; float value; };
+Reading readings[] = {
+  {1, "temp", 0.0},
+  {2, "humid", 0.0},
+  {3, "lux", 0.0}
+};
 
-// Alojar documento Json en climaticdata
-JsonDocument climaticdata;
 
-//Configuración del esp32 como cliente usando HTTPClient como http
-HTTPClient http;
+
+JsonDocument doc;
+JsonArray climaticdata = doc.to<JsonArray>();
+
+void initClimaticData() {
+  for (auto &r : readings) {
+    JsonObject o = climaticdata.add<JsonObject>();
+    o["id"] = r.id;
+    o[r.key] = r.value;
+  }
+}
+
+// ESP32 HTTP server
+WebServer server(80);
 
 //Configuración del gestor de WiFi con WifiManager como wm
 WiFiManager wm;
@@ -54,147 +81,221 @@ WiFiManager wm;
 Adafruit_VEML7700 veml = Adafruit_VEML7700();
 
 //Inicializar el sensor DHT
-DHT dht(dhtData, DHT11); 
+DHT dht(dhtData, DHT22); 
+
+
+
+
+void handleClimaticData() {
+  // Send the most recent sensor values only when a client performs GET.
+  String output;
+  serializeJson(climaticdata, output);
+
+  server.send(200, "application/json", output);
+
+  Serial.println("GET /climatic_variables -> data sent");
+}
+
+
+void handleNotFound() {
+  server.send(404, "text/plain", "Not found");
+}
 
 
 void setup() {
+  
+  setCpuFrequencyMhz(80);
 
-  //Inicio de protocolos de comunicación
-  WiFi.mode(WIFI_STA);  // explicitly set mode, esp defaults to STA+AP
-  WiFi.reconnect();
+  // Build the initial climatic data JSON array (id/key/value entries).
+  initClimaticData();
 
-  Serial.begin(9600);  //Inicia comunicación serial
-  Serial.println("\n Starting ESP32");
+  // Inicio de protocolos de comunicación
+  WiFi.mode(WIFI_STA);
 
-  Wire.begin();  //Inicia comunicación de puestos I2C
+  // Disable Wi-Fi modem sleep. On many routers, the ESP32's power-save
+  // mode causes silent drops after a few minutes of otherwise-idle
+  // traffic. This keeps the radio fully awake and much more stable.
+  WiFi.setSleep(false);
 
+  Serial.begin(9600);
+  Serial.println("\nStarting ESP32");
+
+  Wire.begin();
 
   // Inicio de sensores
-  if (!veml.begin()) { //inicia el sensor veml7700
-  Serial.println("Sensor not found");
-  while (1);
+  if (!veml.begin()) {
+    Serial.println("Sensor not found");
+    while (1);
   }
-  
-  dht.begin(); //inicia el sensor dht
 
+  dht.begin();
 
   // Ajuste inicial del sensor de luz
   lux_sensor_automatic_adjustment();
 
-
-  //Asignación de pines
+  // Asignación de pines
   pinMode(LED_BUILTIN, OUTPUT);
   pinMode(wifiConfTrigger, INPUT_PULLUP);
-  
+
+
+  // Register routes. It's safe to do this before Wi-Fi connects;
+  // the server itself is only started once Wi-Fi is up (see loop()).
+  server.on("/climatic_variables", HTTP_GET, handleClimaticData);
+
+  // Optional: keep the old endpoint name as an alias.
+  server.on("/climatic_variables/body", HTTP_GET, handleClimaticData);
+
+  server.onNotFound(handleNotFound);
+
+  // Try to reconnect using previously stored Wi-Fi credentials.
+  WiFi.reconnect();
+
+  Serial.println("HTTP server configured.");
 }
 
 
-void loop() { // put your main code here, to run repeatedly: 
-  //Take time
+void loop() {
+
+  // Take time
   startTime = millis();
 
-
-
-  // LED blinks if it is connected
+  // LED indicates Wi-Fi/server status.
   led_blink();
 
-
-
-  // Wifi configuration, triggered by pin 10
-  if ( digitalRead(wifiConfTrigger) == LOW ) {
+  // Wi-Fi configuration, triggered by pin 27.
+  if (digitalRead(wifiConfTrigger) == LOW) {
     wifi_connect();
   }
 
+  if (WiFi.status() == WL_CONNECTED) {
 
+    // Reset the recovery state machine so the next disconnect starts fresh.
+    wifiState = WIFI_TRYING;
+    wifiStateStart = 0;
 
-
-  if (WiFi.status() == WL_CONNECTED){  //La conexión al Wi-fi se ha establecido con éxito
-    
-    if (!(objectReady)){  //Hace request al servidor y obtiene path_name_body solo una vez
-      if (request_server_get(path_name_body, &climaticdata)){
-        objectReady = true; //El objeto se ha obtenido con éxito
-      } else {
-        Serial.println("Connecting ..."); //El objeto aún no se ha obtenido
-      }
-      
-      delay(1000);
-
-    } else {   //Una vez el objeto se encuentra listo corre la siguiente rutina
-      
-      
-      
-      if ((startTime - elapsedTime_lux) >= 60000) { //Ajuste automatico de la exposición cada minuto
-        // Ajuste del sensor de luxes
-        lux_sensor_automatic_adjustment();
-        elapsedTime_lux = startTime;
-      }
-
-
-
-      //Lectura y escritra sensor de humedad y temperatura
-      temperature = dht.readTemperature(); // Celsius
-      humidity = dht.readHumidity();
-
-      if (!(isnan(humidity) || isnan(temperature))) {
-        avgData[2] = avgData[2] + veml.readLux(); //Lectura de sensor de luz   
-
-        avgData[0] = avgData[0] + temperature;//Lectura de sensor DHT   
-        avgData[1] = avgData[1] + humidity;
-
-        avgIndex = avgIndex + 1;
-      }
-
-
-      if (avgIndex >= 5){
-        climaticdata[0]["temp"] = avgData[0]/avgIndex;
-        climaticdata[1]["humid"] = avgData[1]/avgIndex;
-        climaticdata[2]["lux"] = avgData[2]/avgIndex;
-
-
-        Serial.print("temp(Celsius): ");
-        Serial.println(climaticdata[0]["temp"].as<float>());
-
-        Serial.print("humid: ");
-        Serial.println(climaticdata[1]["humid"].as<float>());
-
-        Serial.print("lux: ");
-        Serial.println(climaticdata[2]["lux"].as<float>());
-
-        avgIndex = 0;
-        avgData = {0.0, 0.0, 0.0};
-
-      }
-
-
-
-      if ((startTime - elapsedTime_request) >= 2000){ //Actualiza la información del servidor cada 2 segundos
-
-        if (request_server_put(path_name, &climaticdata)){
-          Serial.println("Data sent!");
-        } else {
-          Serial.println("Communication error");
-        }
-
-        elapsedTime_request = startTime;
-
-      }
+    // Wi-Fi just (re)connected: start the server once, not every loop.
+    if (!serverRunning) {
+      server.begin();
+      serverRunning = true;
+      Serial.println("Wi-Fi connected -> HTTP server started.");
+      Serial.println("Request climatic data at: http://" + WiFi.localIP().toString() + "/climatic_variables");
     }
-  } else { //Si la conexión se cae, reincia objectready
 
-    objectReady = false;
+    // This is the important change:
+    // the ESP32 does NOT make a PUT request every 2 seconds.
+    // It waits for/handles incoming HTTP requests from clients.
+    server.handleClient();
+
+    // Adjust the light sensor automatically every minute.
+    if ((startTime - elapsedTime_lux) >= 60000) {
+      lux_sensor_automatic_adjustment();
+      elapsedTime_lux = startTime;
+    }
+
+    // Read temperature and humidity.
+    temperature = dht.readTemperature();
+    humidity = dht.readHumidity();
+
+    if (!(isnan(humidity) || isnan(temperature))) {
+
+      avgData[2] += veml.readLux();
+      avgData[0] += temperature;
+      avgData[1] += humidity;
+
+      avgIndex++;
+    }
+
+    // Average 5 valid readings.
+    if (avgIndex >= 5) {
+
+      climaticdata[0]["temp"] = std::round((avgData[0] / avgIndex)* 100.0) / 100.0;
+      climaticdata[1]["humid"] = std::round((avgData[1] / avgIndex)* 100.0) / 100.0;
+      climaticdata[2]["lux"] = std::round((avgData[2] / avgIndex)* 100.0) / 100.0;
+
+      Serial.print("temp(Celsius): ");
+      Serial.println(climaticdata[0]["temp"].as<float>());
+
+      Serial.print("humid: ");
+      Serial.println(climaticdata[1]["humid"].as<float>());
+
+      Serial.print("lux: ");
+      Serial.println(climaticdata[2]["lux"].as<float>());
+
+      avgIndex = 0;
+      avgData = {0.0, 0.0, 0.0};
+    }
+
+  } else {
+
+    // Wi-Fi just dropped: stop the server so it isn't left running
+    // against a dead connection. It will be restarted above once
+    // Wi-Fi reconnects.
+    if (serverRunning) {
+      server.stop();
+      serverRunning = false;
+      Serial.println("Wi-Fi lost -> HTTP server stopped.");
+    }
+
     Serial.println("Wi-Fi is not connected");
 
+    if (wifiStateStart == 0) {
+      wifiStateStart = millis();  // mark when this state began
+    }
+
+    switch (wifiState) {
+
+      case WIFI_TRYING:
+        // Retry normally every `reconnectInterval` ms.
+        if (millis() - lastReconnectAttempt >= reconnectInterval) {
+          lastReconnectAttempt = millis();
+          Serial.println("Attempting Wi-Fi reconnect...");
+          WiFi.disconnect();   // Clear any stuck connection attempt first
+          WiFi.reconnect();
+        }
+
+        // No luck after 1 minute: stop burning power/airtime and sleep.
+        if (millis() - wifiStateStart >= tryDuration) {
+          Serial.println("Wi-Fi still down after 1 min -> turning radio off.");
+          WiFi.disconnect(true);
+          WiFi.mode(WIFI_OFF);
+          wifiState = WIFI_SLEEPING;
+          wifiStateStart = millis();
+        }
+        break;
+
+      case WIFI_SLEEPING:
+        // Radio is off. Wake it up once every `sleepDuration` to test.
+        if (millis() - wifiStateStart >= sleepDuration) {
+          Serial.println("Waking Wi-Fi radio for a reconnect attempt...");
+          WiFi.mode(WIFI_STA);
+          WiFi.setSleep(false);
+          WiFi.reconnect();
+          wifiState = WIFI_ATTEMPTING;
+          wifiStateStart = millis();
+        }
+        break;
+
+      case WIFI_ATTEMPTING:
+        // Give the woken radio a short window to connect.
+        if (millis() - wifiStateStart >= attemptDuration) {
+          Serial.println("Reconnect attempt failed -> turning radio off again.");
+          WiFi.disconnect(true);
+          WiFi.mode(WIFI_OFF);
+          wifiState = WIFI_SLEEPING;
+          wifiStateStart = millis();
+        }
+        break;
+    }
+
     delay(1000);
-
   }
-} 
+}
 
 
 
+void led_blink() {
+  if (WiFi.status() == WL_CONNECTED) {
 
-
-void led_blink(){
-  if (objectReady){
     if ((startTime - elapsedTime_blink) >= 2900) {
       digitalWrite(LED_BUILTIN, HIGH);
     } else {
@@ -203,11 +304,11 @@ void led_blink(){
 
     if ((startTime - elapsedTime_blink) >= 3000) {
       elapsedTime_blink = startTime;
-    } 
+    }
+
   } else {
     digitalWrite(LED_BUILTIN, LOW);
   }
-
 }
 
 
@@ -265,74 +366,4 @@ void lux_sensor_automatic_adjustment() {
     case VEML7700_IT_400MS: Serial.println("400"); break;
     case VEML7700_IT_800MS: Serial.println("800"); break;
   }
-}
-
-
-
-bool request_server_get(String path_name, JsonDocument* doc) {
-  http.begin(host_name + path_name); // Inicia comunicación HTTP
-
-  int httpCode = http.GET();
-  
-
-  DeserializationError error;
-  if (httpCode > 0) { 
-    if (httpCode == HTTP_CODE_OK) {
-      String payload = http.getString();
-      Serial.printf("Request GET successfully to %s — server response (HTTP %d)\n", path_name.c_str(), httpCode);
-      error = deserializeJson(*doc, payload);
-    } else {
-      Serial.printf("[HTTP] GET... code: %d\n", httpCode);
-      return false;
-    }
-  } else {
-    Serial.printf("[HTTP] GET... failed, error: %s\n",
-    http.errorToString(httpCode).c_str());
-    http.end();
-    return false;
-  }
-
-  if (error) {
-    Serial.print("deserializeJson() failed: ");
-    Serial.println(error.c_str());
-    http.end();
-    return false;
-  }
-  
-  http.end();
-  return true;
-}
-
-
-
-bool request_server_put(String path_name, JsonDocument* doc){
-  http.begin(host_name + path_name); //Inicia comunicación HTTP 
-  
-  // Definir headers con app.json content type
-  http.addHeader("Content-Type", "application/json");
-
-  String output;
-  serializeJson(*doc, output);
-
-  int httpCode = http.PUT(output);
-
-  // No se ocupan más checks
-  if (httpCode > 0) {
-    // Porfa funcione
-    if (httpCode == HTTP_CODE_OK) {
-      Serial.printf("Request PUT successfully to %s — server response (HTTP %d)\n", path_name.c_str(), httpCode);
-    } else {
-      // Acá se maneja la conexión si hay errores o no
-      Serial.printf("[HTTP] PUT... code: %d\n", httpCode); 
-      return false;
-    }
-  } else {
-    //Error managing
-    Serial.printf("[HTTP] PUT... failed, error: %s\n", http.errorToString(httpCode).c_str());
-    http.end();
-    return false;
-  }
-
-  http.end();
-  return true;
 }
