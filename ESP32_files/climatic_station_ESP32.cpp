@@ -179,6 +179,7 @@ void loop() {
       serverRunning = true;
       Serial.println("Wi-Fi connected -> HTTP server started.");
       Serial.println("Request climatic data at: http://" + WiFi.localIP().toString() + "/climatic_variables");
+      Serial.println("MAC address: " + WiFi.macAddress());
     }
 
     // This is the important change:
