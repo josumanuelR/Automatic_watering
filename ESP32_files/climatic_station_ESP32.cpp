@@ -6,6 +6,7 @@
 #include <ArduinoJson.h>
 #include <Adafruit_VEML7700.h>
 #include <DHT.h>
+#include <ESPmDNS.h>  
 
 
 
@@ -116,6 +117,12 @@ void setup() {
   // mode causes silent drops after a few minutes of otherwise-idle
   // traffic. This keeps the radio fully awake and much more stable.
   WiFi.setSleep(false);
+
+  wm.setHostname("climatic-station");
+
+  if (MDNS.begin("climatic-station")) {
+    Serial.println("mDNS started");
+  }
 
   Serial.begin(9600);
   Serial.println("\nStarting ESP32");
